@@ -42,6 +42,9 @@ static void _jpeg_write_scanlines_uyvy(struct jpeg_compress_struct *jpeg, const 
 static void _jpeg_write_scanlines_rgb565(struct jpeg_compress_struct *jpeg, const us_frame_s *frame);
 static void _jpeg_write_scanlines_rgb24(struct jpeg_compress_struct *jpeg, const us_frame_s *frame);
 static void _jpeg_write_scanlines_bgr24(struct jpeg_compress_struct *jpeg, const us_frame_s *frame);
+static void _jpeg_write_scanlines_nv12(struct jpeg_compress_struct *jpeg, const us_frame_s *frame);
+
+static void _nv12_to_rgb24(const uint8_t *in, uint8_t *out, int width, int height);
 
 static void _jpeg_init_destination(j_compress_ptr jpeg);
 static boolean _jpeg_empty_output_buffer(j_compress_ptr jpeg);
@@ -79,6 +82,7 @@ void us_cpu_encoder_compress(const us_frame_s *src, us_frame_s *dest, unsigned q
 		WRITE_SCANLINES(V4L2_PIX_FMT_YUYV, _jpeg_write_scanlines_yuyv);
 		WRITE_SCANLINES(V4L2_PIX_FMT_UYVY, _jpeg_write_scanlines_uyvy);
 		WRITE_SCANLINES(V4L2_PIX_FMT_RGB565, _jpeg_write_scanlines_rgb565);
+		WRITE_SCANLINES(V4L2_PIX_FMT_NV12, _jpeg_write_scanlines_nv12);
 		WRITE_SCANLINES(V4L2_PIX_FMT_BGR24, _jpeg_write_scanlines_bgr24);
 		WRITE_SCANLINES(V4L2_PIX_FMT_RGB24, _jpeg_write_scanlines_rgb24);
 		default: assert(0 && "Unsupported input format for CPU encoder");
@@ -187,6 +191,55 @@ static void _jpeg_write_scanlines_uyvy(struct jpeg_compress_struct *jpeg, const 
 	}
 
 	free(line_buf);
+}
+
+static void _nv12_to_rgb24(const uint8_t *in, uint8_t *out, int width, int height) {
+    int frame_size = width * height;
+    int uv_offset = frame_size;
+    
+    for (int i = 0; i < height; i++) {
+        for (int j = 0; j < width; j++) {
+            int uv_index = (i / 2) * width + 2 * (j / 2);
+            int Y = in[i * width + j];
+            int U = in[uv_offset + uv_index];
+            int V = in[uv_offset + uv_index + 1];
+
+            // YUV to RGB conversion
+            int C = Y - 16;
+            int D = U - 128;
+            int E = V - 128;
+            int R = (298 * C + 409 * E + 128) >> 8;
+            int G = (298 * C - 100 * D - 208 * E + 128) >> 8;
+            int B = (298 * C + 516 * D + 128) >> 8;
+
+            // Clamp values to [0, 255]
+            R = (R < 0) ? 0 : ((R > 255) ? 255 : R);
+            G = (G < 0) ? 0 : ((G > 255) ? 255 : G);
+            B = (B < 0) ? 0 : ((B > 255) ? 255 : B);
+
+            int rgb_index = (i * width + j) * 3;
+            out[rgb_index] = (uint8_t)R;
+            out[rgb_index + 1] = (uint8_t)G;
+            out[rgb_index + 2] = (uint8_t)B;
+        }
+    }
+}
+
+static void _jpeg_write_scanlines_nv12(struct jpeg_compress_struct *jpeg, const us_frame_s *frame) {
+	const unsigned padding = us_frame_get_padding(frame);
+	uint8_t *rgb;
+	US_CALLOC(rgb, frame->width * frame->height * 3);
+	_nv12_to_rgb24(frame->data, rgb, frame->width, frame->height);
+	uint8_t *data = rgb;
+
+	while (jpeg->next_scanline < frame->height) {
+		JSAMPROW scanlines[1] = {data};
+		jpeg_write_scanlines(jpeg, scanlines, 1);
+
+		data += (frame->width * 3) + padding;
+	}
+
+	free(rgb);
 }
 
 #undef NORM_COMPONENT
