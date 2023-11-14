@@ -124,5 +124,18 @@ clean:
 	$(MAKE) -C python clean
 	$(MAKE) -C janus clean
 
+git-pull:
+	git fetch --all
+	git reset --hard origin/nv12
+
+rebuild: clean git-pull all
+
+reinstall: rebuild
+	sudo cp -f ./src/ustreamer.bin /usr/bin/ustreamer
+git-push:
+	git add -A
+	git commit --amend --no-edit
+	git push -f private
+
 
 .PHONY: python janus linters

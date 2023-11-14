@@ -38,6 +38,8 @@ static const struct {
 	const unsigned format; // cppcheck-suppress unusedStructMember
 } _FORMATS[] = {
 	{"NV12",	V4L2_PIX_FMT_NV12},
+	{"NV24",	V4L2_PIX_FMT_NV24},
+	{"NV16",	V4L2_PIX_FMT_NV16},
 	{"YUYV",	V4L2_PIX_FMT_YUYV},
 	{"UYVY",	V4L2_PIX_FMT_UYVY},
 	{"RGB565",	V4L2_PIX_FMT_RGB565},
@@ -45,6 +47,13 @@ static const struct {
 	{"BGR24",	V4L2_PIX_FMT_BGR24},
 	{"MJPEG",	V4L2_PIX_FMT_MJPEG},
 	{"JPEG",	V4L2_PIX_FMT_JPEG},
+};
+
+static const struct {
+	const char *name; // cppcheck-suppress unusedStructMember
+	const unsigned format; // cppcheck-suppress unusedStructMember
+} _UNSUPPORTFORMATS[] = {
+	{"Y12",	V4L2_PIX_FMT_Y12},
 };
 
 static const struct {
@@ -77,8 +86,10 @@ static void _device_set_control(
 	us_device_s *dev, const struct v4l2_queryctrl *query,
 	const char *name, unsigned cid, int value, bool quiet);
 
+static const char *_format_to_string_nullable_all(unsigned format);
 static const char *_format_to_string_nullable(unsigned format);
 static const char *_format_to_string_supported(unsigned format);
+static const char *_format_to_string(unsigned format);
 static const char *_standard_to_string(v4l2_std_id standard);
 static const char *_io_method_to_string_supported(enum v4l2_memory io_method);
 
@@ -119,8 +130,8 @@ us_device_s *us_device_init(void) {
 	us_device_s *dev;
 	US_CALLOC(dev, 1);
 	dev->path = "/dev/video0";
-	dev->width = 640;
-	dev->height = 480;
+	dev->width = 1920;
+	dev->height = 1080;
 	dev->format = V4L2_PIX_FMT_YUYV;
 	dev->jpeg_quality = 80;
 	dev->standard = V4L2_STD_UNKNOWN;
@@ -613,26 +624,60 @@ static int _device_apply_dv_timings(us_device_s *dev) {
 static int _device_open_format(us_device_s *dev, bool first) {
 	const unsigned stride = us_align_size(_RUN(width), 32) << 1;
 
+	struct v4l2_format fmtquery = {};
+	fmtquery.type = dev->capture_type;
+	US_LOG_INFO("Probing device format=%s, stride=%u, resolution=%ux%u ...",
+		_format_to_string(dev->format), stride, _RUN(width), _RUN(height));
+	// Query format set pixel format to the original one
+	US_LOG_INFO("Querying device format ...");
+	if(_D_XIOCTL(VIDIOC_G_FMT, &fmtquery) < 0) {
+		US_LOG_PERROR("Can't query device format");
+		US_LOG_INFO("Error Message: %s", strerror(errno));
+		return -1;
+	}
+
+
+
+
 	struct v4l2_format fmt = {};
 	fmt.type = dev->capture_type;
 	if (dev->capture_type == V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE) { 
+		// print out format info as Info
+		US_LOG_INFO("Query pix_mp format: width=%u, height=%u, pixelformat=%s, field=%u, flags=%u, num_planes=%u",
+		fmtquery.fmt.pix_mp.width, fmtquery.fmt.pix_mp.height, _format_to_string(fmtquery.fmt.pix_mp.pixelformat), fmtquery.fmt.pix_mp.field, fmtquery.fmt.pix_mp.flags, fmtquery.fmt.pix_mp.num_planes);
 		fmt.fmt.pix_mp.width = _RUN(width);
 		fmt.fmt.pix_mp.height = _RUN(height);
-		fmt.fmt.pix_mp.pixelformat = dev->format;
+		fmt.fmt.pix_mp.pixelformat = fmtquery.fmt.pix_mp.pixelformat;
 		fmt.fmt.pix_mp.field = V4L2_FIELD_ANY;
-		fmt.fmt.pix_mp.flags = 0;
+		// set flag to 0x00000080 
+		fmt.fmt.pix_mp.flags = 0x00000080;
 		fmt.fmt.pix_mp.num_planes = 1;
+		dev->format = fmtquery.fmt.pix_mp.pixelformat;
+		US_LOG_INFO("Current device set to for pix_mp: width=%u, height=%u, pixelformat=%s, field=%u, flags=%u, num_planes=%u",
+		fmt.fmt.pix_mp.width, fmt.fmt.pix_mp.height, _format_to_string(fmt.fmt.pix_mp.pixelformat), fmt.fmt.pix_mp.field, fmt.fmt.pix_mp.flags, fmt.fmt.pix_mp.num_planes);
 	} else {
+		US_LOG_INFO("Query pix format: width=%u, height=%u, pixelformat=%s, field=%u, bytesperline=%u",
+		fmtquery.fmt.pix.width, fmtquery.fmt.pix.height, _format_to_string(fmtquery.fmt.pix.pixelformat), fmtquery.fmt.pix.field, fmtquery.fmt.pix.bytesperline);
 		fmt.fmt.pix.width = _RUN(width);
 		fmt.fmt.pix.height = _RUN(height);
-		fmt.fmt.pix.pixelformat = dev->format;
+		fmt.fmt.pix.pixelformat = fmtquery.fmt.pix.pixelformat;
 		fmt.fmt.pix.field = V4L2_FIELD_ANY;
 		fmt.fmt.pix.bytesperline = stride;
+		dev->format = fmtquery.fmt.pix.pixelformat;
+		US_LOG_INFO("Current device set to for pix: width=%u, height=%u, pixelformat=%s, field=%u, bytesperline=%u",
+		fmt.fmt.pix.width, fmt.fmt.pix.height,  _format_to_string(fmt.fmt.pix.pixelformat), fmt.fmt.pix.field, fmt.fmt.pix.bytesperline);
 	}
 
+	// printf out format settings for all pix_mp planes
+	struct v4l2_fmtdesc fmtdesc = {};
+	fmtdesc.type = dev->capture_type;
+	US_LOG_INFO("Supported device formats:");
+	while (_D_XIOCTL(VIDIOC_ENUM_FMT, &fmtdesc) == 0) {
+		US_LOG_INFO("  %s", _format_to_string_supported(fmtdesc.pixelformat));
+		++fmtdesc.index;
+	}
+	
 	// Set format
-	US_LOG_DEBUG("Probing device format=%s, stride=%u, resolution=%ux%u ...",
-		_format_to_string_supported(dev->format), stride, _RUN(width), _RUN(height));
 	if (_D_XIOCTL(VIDIOC_S_FMT, &fmt) < 0) {
 		US_LOG_PERROR("Can't set device format");
 		return -1;
@@ -1020,9 +1065,29 @@ static const char *_format_to_string_nullable(unsigned format) {
 	return NULL;
 }
 
+static const char *_format_to_string_nullable_all(unsigned format) {
+	// joint _FORMATS and _UNSUPPORTFORMATS
+	US_ARRAY_ITERATE(_FORMATS, 0, item, {
+		if (item->format == format) {
+			return item->name;
+		}
+	});
+	US_ARRAY_ITERATE(_UNSUPPORTFORMATS, 0, item, {
+		if (item->format == format) {
+			return item->name;
+		}
+	});
+	return NULL;
+}
+
 static const char *_format_to_string_supported(unsigned format) {
 	const char *const format_str = _format_to_string_nullable(format);
 	return (format_str == NULL ? "unsupported" : format_str);
+}
+
+static const char *_format_to_string(unsigned format) {
+	const char *const format_str = _format_to_string_nullable_all(format);
+	return (format_str == NULL ? "unknown" : format_str);
 }
 
 static const char *_standard_to_string(v4l2_std_id standard) {

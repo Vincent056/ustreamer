@@ -43,8 +43,12 @@ static void _jpeg_write_scanlines_rgb565(struct jpeg_compress_struct *jpeg, cons
 static void _jpeg_write_scanlines_rgb24(struct jpeg_compress_struct *jpeg, const us_frame_s *frame);
 static void _jpeg_write_scanlines_bgr24(struct jpeg_compress_struct *jpeg, const us_frame_s *frame);
 static void _jpeg_write_scanlines_nv12(struct jpeg_compress_struct *jpeg, const us_frame_s *frame);
+static void _jpeg_write_scanlines_nv16(struct jpeg_compress_struct *jpeg, const us_frame_s *frame);
+static void _jpeg_write_scanlines_nv24(struct jpeg_compress_struct *jpeg, const us_frame_s *frame);
 
 static void _nv12_to_rgb24(const uint8_t *in, uint8_t *out, int width, int height);
+static void _nv16_to_rgb24(const uint8_t *in, uint8_t *out, int width, int height);
+static void _nv24_to_rgb24(const uint8_t *in, uint8_t *out, int width, int height);
 
 static void _jpeg_init_destination(j_compress_ptr jpeg);
 static boolean _jpeg_empty_output_buffer(j_compress_ptr jpeg);
@@ -83,8 +87,10 @@ void us_cpu_encoder_compress(const us_frame_s *src, us_frame_s *dest, unsigned q
 		WRITE_SCANLINES(V4L2_PIX_FMT_UYVY, _jpeg_write_scanlines_uyvy);
 		WRITE_SCANLINES(V4L2_PIX_FMT_RGB565, _jpeg_write_scanlines_rgb565);
 		WRITE_SCANLINES(V4L2_PIX_FMT_NV12, _jpeg_write_scanlines_nv12);
+		WRITE_SCANLINES(V4L2_PIX_FMT_NV16, _jpeg_write_scanlines_nv16);
 		WRITE_SCANLINES(V4L2_PIX_FMT_BGR24, _jpeg_write_scanlines_bgr24);
 		WRITE_SCANLINES(V4L2_PIX_FMT_RGB24, _jpeg_write_scanlines_rgb24);
+		WRITE_SCANLINES(V4L2_PIX_FMT_NV24, _jpeg_write_scanlines_nv24);
 		default: assert(0 && "Unsupported input format for CPU encoder");
 	}
 
@@ -193,6 +199,54 @@ static void _jpeg_write_scanlines_uyvy(struct jpeg_compress_struct *jpeg, const 
 	free(line_buf);
 }
 
+static void _nv16_to_rgb24(const uint8_t *in, uint8_t *out, int width, int height) {
+    int frame_size = width * height;
+    int uv_offset = frame_size;
+
+    for (int i = 0; i < height; i++) {
+        for (int j = 0; j < width; j++) {
+            int y_index = i * width + j;
+            int uv_index = uv_offset + (i * width) + (j & ~1); // For each pair of pixels, the same UV is used
+            int Y = in[y_index];
+            int U = in[uv_index] - 128;   // Cb component
+            int V = in[uv_index + 1] - 128; // Cr component
+
+            // YUV to RGB conversion
+            int R = (298 * (Y - 16) + 409 * V + 128) >> 8;
+            int G = (298 * (Y - 16) - 100 * U - 208 * V + 128) >> 8;
+            int B = (298 * (Y - 16) + 516 * U + 128) >> 8;
+
+            // Clamp values to [0, 255]
+            R = R < 0 ? 0 : (R > 255 ? 255 : R);
+            G = G < 0 ? 0 : (G > 255 ? 255 : G);
+            B = B < 0 ? 0 : (B > 255 ? 255 : B);
+
+            int rgb_index = y_index * 3;
+            out[rgb_index] = (uint8_t)R;
+            out[rgb_index + 1] = (uint8_t)G;
+            out[rgb_index + 2] = (uint8_t)B;
+        }
+    }
+}
+
+static void _jpeg_write_scanlines_nv16(struct jpeg_compress_struct *jpeg, const us_frame_s *frame) {
+    const unsigned padding = us_frame_get_padding(frame);
+    uint8_t *rgb;
+    US_CALLOC(rgb, frame->width * frame->height * 3);
+    _nv16_to_rgb24(frame->data, rgb, frame->width, frame->height);
+    uint8_t *data = rgb;
+
+    while (jpeg->next_scanline < frame->height) {
+        JSAMPROW scanlines[1] = {data};
+        jpeg_write_scanlines(jpeg, scanlines, 1);
+
+        data += (frame->width * 3) + padding;
+    }
+
+    free(rgb);
+}
+
+
 static void _nv12_to_rgb24(const uint8_t *in, uint8_t *out, int width, int height) {
     int frame_size = width * height;
     int uv_offset = frame_size;
@@ -224,6 +278,37 @@ static void _nv12_to_rgb24(const uint8_t *in, uint8_t *out, int width, int heigh
         }
     }
 }
+static void _nv24_to_rgb24(const uint8_t *in, uint8_t *out, int width, int height) {
+    int frame_size = width * height;
+    int uv_offset = frame_size;
+
+    for (int i = 0; i < height; i++) {
+        for (int j = 0; j < width; j++) {
+            int y_index = i * width + j;
+            int uv_index = uv_offset + (2 * j) + (i * width * 2); // Adjusted for full resolution CbCr plane
+            int Y = in[y_index];
+            int U = in[uv_index] - 128; // Cb component
+            int V = in[uv_index + 1] - 128; // Cr component
+
+            // YUV to RGB conversion
+            int R = (298 * (Y - 16) + 409 * V + 128) >> 8;
+            int G = (298 * (Y - 16) - 100 * U - 208 * V + 128) >> 8;
+            int B = (298 * (Y - 16) + 516 * U + 128) >> 8;
+
+            // Clamp values to [0, 255]
+            R = R < 0 ? 0 : (R > 255 ? 255 : R);
+            G = G < 0 ? 0 : (G > 255 ? 255 : G);
+            B = B < 0 ? 0 : (B > 255 ? 255 : B);
+
+            int rgb_index = y_index * 3;
+            out[rgb_index] = (uint8_t)R;
+            out[rgb_index + 1] = (uint8_t)G;
+            out[rgb_index + 2] = (uint8_t)B;
+        }
+    }
+}
+
+
 
 static void _jpeg_write_scanlines_nv12(struct jpeg_compress_struct *jpeg, const us_frame_s *frame) {
 	const unsigned padding = us_frame_get_padding(frame);
@@ -240,6 +325,23 @@ static void _jpeg_write_scanlines_nv12(struct jpeg_compress_struct *jpeg, const 
 	}
 
 	free(rgb);
+}
+
+static void _jpeg_write_scanlines_nv24(struct jpeg_compress_struct *jpeg, const us_frame_s *frame) {
+    const unsigned padding = us_frame_get_padding(frame);
+    uint8_t *rgb;
+    US_CALLOC(rgb, frame->width * frame->height * 3);
+    _nv24_to_rgb24(frame->data, rgb, frame->width, frame->height);
+    uint8_t *data = rgb;
+
+    while (jpeg->next_scanline < frame->height) {
+        JSAMPROW scanlines[1] = {data};
+        jpeg_write_scanlines(jpeg, scanlines, 1);
+
+        data += (frame->width * 3) + padding;
+    }
+
+    free(rgb);
 }
 
 #undef NORM_COMPONENT
